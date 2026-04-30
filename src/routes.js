@@ -121,6 +121,37 @@ router.post('/location', authMiddleware, (req, res) => {
   }
 });
 
+// GET /api/admin/users — ALL registered users
+router.get('/admin/users', authMiddleware, (req, res) => {
+  try {
+    const users = db.prepare(`
+      SELECT u.id, u.name, u.email, u.city, u.lat, u.lng,
+             u.pace, u.distance, u.schedule, u.goal, u.level,
+             u.available, u.avatar, u.km_year, u.races_done,
+             u.last_seen, u.created_at,
+             l.lat as gps_lat, l.lng as gps_lng,
+             l.is_running, l.speed, l.updated_at as gps_updated
+      FROM users u
+      LEFT JOIN locations l ON l.user_id = u.id
+      ORDER BY u.created_at DESC
+    `).all();
+    res.json(users);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// GET /api/admin/stats — app statistics
+router.get('/admin/stats', authMiddleware, (req, res) => {
+  try {
+    const totalUsers  = db.prepare('SELECT COUNT(*) as n FROM users').get().n;
+    const todayUsers  = db.prepare("SELECT COUNT(*) as n FROM users WHERE created_at > datetime('now','-1 day')").get().n;
+    const onlineUsers = db.prepare("SELECT COUNT(*) as n FROM locations WHERE updated_at > datetime('now','-30 minutes')").get().n;
+    const totalMsgs   = db.prepare('SELECT COUNT(*) as n FROM messages').get().n;
+    const totalRaces  = db.prepare('SELECT COUNT(*) as n FROM races').get().n;
+    const totalSubs   = db.prepare("SELECT COUNT(*) as n FROM coaching_subscriptions WHERE status='active'").get().n;
+    res.json({ totalUsers, todayUsers, onlineUsers, totalMsgs, totalRaces, totalSubs });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // GET /api/location/nearby — get runners near me
 router.get('/location/nearby', authMiddleware, (req, res) => {
   try {
