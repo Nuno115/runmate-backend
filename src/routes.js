@@ -160,7 +160,7 @@ router.get('/location/nearby', authMiddleware, (req, res) => {
 
     const radius = me.radius_km || 15;
 
-    // Get all users with recent locations (last 30 min)
+    // Get all users with recent locations (last 30 min) — exclude admin
     const users = db.prepare(`
       SELECT u.id, u.name, u.avatar, u.city, u.pace, u.distance, u.schedule,
              u.goal, u.level, u.available, u.bio, u.last_seen,
@@ -168,6 +168,7 @@ router.get('/location/nearby', authMiddleware, (req, res) => {
       FROM users u
       LEFT JOIN locations l ON l.user_id = u.id
       WHERE u.id != ?
+      AND u.email != 'admin@runmate.pt'
       AND (l.updated_at > datetime('now', '-30 minutes') OR l.updated_at IS NULL)
     `).all(req.userId);
 
