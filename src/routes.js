@@ -612,6 +612,64 @@ router.get('/coaching/goals', authMiddleware, (req, res) => {
   }
 });
 
+// ══════════════════════════════════════════════════
+//  PUSH NOTIFICATIONS
+// ══════════════════════════════════════════════════
+
+// POST /api/notifications/token — save FCM token
+router.post('/notifications/token', authMiddleware, (req, res) => {
+  try {
+    const { token } = req.body;
+    if (!token) return res.status(400).json({ error: 'Token obrigatório' });
+
+    // Store token (upsert)
+    db.prepare(`
+      CREATE TABLE IF NOT EXISTS fcm_tokens (
+        user_id TEXT REFERENCES users(id),
+        token   TEXT NOT NULL,
+        updated_at TEXT DEFAULT (datetime('now')),
+        PRIMARY KEY (user_id)
+      )
+    `).run();
+
+    db.prepare(`
+      INSERT INTO fcm_tokens (user_id, token, updated_at)
+      VALUES (?, ?, datetime('now'))
+      ON CONFLICT(user_id) DO UPDATE SET token=excluded.token, updated_at=excluded.updated_at
+    `).run(req.userId, token);
+
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/notifications/send — send push notification to a user
+router.post('/notifications/send', authMiddleware, (req, res) => {
+  try {
+    const { to_user, title, body, data } = req.body;
+
+    // Get target user's FCM token
+    let tokenRow;
+    try {
+      tokenRow = db.prepare('SELECT token FROM fcm_tokens WHERE user_id=?').get(to_user);
+    } catch (e) {
+      // Table might not exist yet
+      return res.json({ ok: false, reason: 'no_token' });
+    }
+
+    if (!tokenRow) return res.json({ ok: false, reason: 'no_token' });
+
+    // Send via Firebase Admin (using fetch to FCM v1 API)
+    // Note: In production, use firebase-admin SDK with service account
+    // For now, we log the notification intent
+    console.log(`📱 Notification to ${to_user}: ${title} — ${body}`);
+    res.json({ ok: true, token_found: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // POST /api/coaching/cancel
 router.post('/coaching/cancel', authMiddleware, (req, res) => {
   try {
