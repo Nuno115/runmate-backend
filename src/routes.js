@@ -1,6 +1,7 @@
 // src/routes.js — RunMate API Routes
 const express = require('express');
 const bcrypt = require('bcryptjs');
+const https = require('https');
 // UUID v4 generator (no external dependency needed)
 function uuidv4() {
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
@@ -331,7 +332,7 @@ router.get('/messages/:userId', authMiddleware, (req, res) => {
 });
 
 // POST /api/messages — send message (private or group)
-router.post('/messages', authMiddleware, (req, res) => {
+router.post('/messages', authMiddleware, async (req, res) => {
   try {
     const { to_user, body, is_group } = req.body;
     if (!body) return res.status(400).json({ error: 'Mensagem não pode estar vazia' });
@@ -342,6 +343,15 @@ router.post('/messages', authMiddleware, (req, res) => {
       INSERT INTO messages (id, from_user, to_user, is_group, body)
       VALUES (?, ?, ?, ?, ?)
     `).run(id, req.userId, to_user || null, is_group ? 1 : 0, body);
+
+    // Send push notification
+    const sender = db.prepare('SELECT name FROM users WHERE id=?').get(req.userId);
+    const senderName = sender ? sender.name : 'RunMate';
+
+    if (!is_group && to_user) {
+      // Private message notification
+      notifyUser(to_user, '💬 ' + senderName, body.slice(0, 100), { type: 'message', from: req.userId });
+    }
 
     res.json(db.prepare('SELECT * FROM messages WHERE id=?').get(id));
   } catch (err) {
@@ -663,31 +673,117 @@ router.post('/notifications/token', authMiddleware, (req, res) => {
   }
 });
 
+// Firebase Admin — send FCM notification via HTTP v1 API
+const FIREBASE_PROJECT_ID = 'runmate-54b4c';
+const FIREBASE_CLIENT_EMAIL = 'firebase-adminsdk-fbsvc@runmate-54b4c.iam.gserviceaccount.com';
+const FIREBASE_PRIVATE_KEY = process.env.FIREBASE_PRIVATE_KEY || '';
+
+async function getFirebaseAccessToken() {
+  // Create JWT for Google OAuth2
+  const now = Math.floor(Date.now() / 1000);
+  const header = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url');
+  const payload = Buffer.from(JSON.stringify({
+    iss: FIREBASE_CLIENT_EMAIL,
+    scope: 'https://www.googleapis.com/auth/firebase.messaging',
+    aud: 'https://oauth2.googleapis.com/token',
+    exp: now + 3600,
+    iat: now
+  })).toString('base64url');
+
+  const crypto = require('crypto');
+  const sign = crypto.createSign('RSA-SHA256');
+  sign.update(`${header}.${payload}`);
+  const privateKey = FIREBASE_PRIVATE_KEY.replace(/\n/g, '
+');
+  const signature = sign.sign(privateKey, 'base64url');
+  const jwt = `${header}.${payload}.${signature}`;
+
+  // Exchange JWT for access token
+  return new Promise((resolve, reject) => {
+    const postData = `grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${jwt}`;
+    const options = {
+      hostname: 'oauth2.googleapis.com', path: '/token', method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': Buffer.byteLength(postData) }
+    };
+    const req = https.request(options, res => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try { resolve(JSON.parse(data).access_token); } catch(e) { reject(e); }
+      });
+    });
+    req.on('error', reject);
+    req.write(postData);
+    req.end();
+  });
+}
+
+async function sendFCMNotification(fcmToken, title, body, data = {}) {
+  try {
+    const accessToken = await getFirebaseAccessToken();
+    const message = JSON.stringify({
+      message: {
+        token: fcmToken,
+        notification: { title, body },
+        data: { ...data, click_action: 'https://runmate-4ak.pages.dev' },
+        android: { priority: 'high', notification: { sound: 'default', channel_id: 'runmate' } },
+        webpush: { headers: { Urgency: 'high' }, notification: { icon: '/icon-192.png', badge: '/icon-192.png' } }
+      }
+    });
+
+    return new Promise((resolve, reject) => {
+      const options = {
+        hostname: 'fcm.googleapis.com',
+        path: `/v1/projects/${FIREBASE_PROJECT_ID}/messages:send`,
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(message) }
+      };
+      const req = https.request(options, res => {
+        let data = '';
+        res.on('data', chunk => data += chunk);
+        res.on('end', () => {
+          console.log('📱 FCM response:', res.statusCode, data.slice(0, 100));
+          resolve(res.statusCode === 200);
+        });
+      });
+      req.on('error', e => { console.error('FCM error:', e.message); resolve(false); });
+      req.write(message);
+      req.end();
+    });
+  } catch (err) {
+    console.error('FCM send error:', err.message);
+    return false;
+  }
+}
+
 // POST /api/notifications/send — send push notification to a user
-router.post('/notifications/send', authMiddleware, (req, res) => {
+router.post('/notifications/send', authMiddleware, async (req, res) => {
   try {
     const { to_user, title, body, data } = req.body;
 
-    // Get target user's FCM token
     let tokenRow;
     try {
       tokenRow = db.prepare('SELECT token FROM fcm_tokens WHERE user_id=?').get(to_user);
     } catch (e) {
-      // Table might not exist yet
       return res.json({ ok: false, reason: 'no_token' });
     }
 
     if (!tokenRow) return res.json({ ok: false, reason: 'no_token' });
 
-    // Send via Firebase Admin (using fetch to FCM v1 API)
-    // Note: In production, use firebase-admin SDK with service account
-    // For now, we log the notification intent
-    console.log(`📱 Notification to ${to_user}: ${title} — ${body}`);
-    res.json({ ok: true, token_found: true });
+    const sent = await sendFCMNotification(tokenRow.token, title, body, data || {});
+    res.json({ ok: sent, token_found: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
+
+// Internal helper to notify a user
+async function notifyUser(userId, title, body, data = {}) {
+  try {
+    const tokenRow = db.prepare('SELECT token FROM fcm_tokens WHERE user_id=?').get(userId);
+    if (tokenRow) await sendFCMNotification(tokenRow.token, title, body, data);
+  } catch(e) {}
+}
 
 // POST /api/coaching/cancel
 router.post('/coaching/cancel', authMiddleware, (req, res) => {
