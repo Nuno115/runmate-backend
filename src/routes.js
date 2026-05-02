@@ -468,6 +468,25 @@ router.get('/invites/received', authMiddleware, (req, res) => {
 //  COACHING
 // ══════════════════════════════════════════════════
 
+// POST /api/auth/reset-password — simple password reset
+router.post('/auth/reset-password', (req, res) => {
+  try {
+    const { email, new_password } = req.body;
+    if (!email || !new_password) return res.status(400).json({ error: 'Email e nova password obrigatórios' });
+    if (new_password.length < 6) return res.status(400).json({ error: 'Password deve ter pelo menos 6 caracteres' });
+
+    const user = db.prepare('SELECT id FROM users WHERE email=?').get(email);
+    if (!user) return res.status(404).json({ error: 'Email não encontrado' });
+
+    const hash = bcrypt.hashSync(new_password, 10);
+    db.prepare('UPDATE users SET password=? WHERE email=?').run(hash, email);
+
+    res.json({ ok: true, message: 'Password atualizada com sucesso' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /api/coaching/plans
 router.get('/coaching/plans', authMiddleware, (req, res) => {
   try {
